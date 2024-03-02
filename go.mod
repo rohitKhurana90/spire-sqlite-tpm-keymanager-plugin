@@ -12,6 +12,7 @@ require (
 	github.com/dixonwille/wmenu v4.0.2+incompatible // indirect
 	github.com/fatih/color v1.15.0 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.1 // indirect
+	github.com/golang/glog v1.2.0 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/google/go-tpm v0.9.0 // indirect
 	github.com/hashicorp/go-hclog v1.6.2 // indirect
