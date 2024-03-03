@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"github.com/spiffe/spire-plugin-sdk/pluginmain"
 	"log"
 	"sync"
@@ -45,17 +44,6 @@ type KeyManager struct {
 
 func newKeyManager(generator Generator) *KeyManager {
 	log.Println("New keymanager configuring")
-	//db, err := connectToDatabase()
-	//defer func(db *sql.DB) {
-	//	err := db.Close()
-	//	if err != nil {
-	//
-	//	}
-	//}(db)
-	//if err != nil {
-	//	log.Fatalf("Error connecting to database")
-	//}
-	//openTpmAndInitialize()
 	m := &KeyManager{}
 	m.Base = keymanagerbase.New(keymanagerbase.Config{
 		WriteEntries: m.writeEntries,
@@ -65,18 +53,6 @@ func newKeyManager(generator Generator) *KeyManager {
 }
 
 func (m *KeyManager) Configure(_ context.Context, req *configv1.ConfigureRequest) (*configv1.ConfigureResponse, error) {
-	//print("Configuring plugin in configure")
-	//if err := hcl.Decode(req.HclConfiguration); err != nil {
-	//	return nil, status.Errorf(codes.InvalidArgument, "unable to decode configuration: %v", err)
-	//}
-
-	//if config.KeysPath == "" {
-	//	return nil, status.Error(codes.InvalidArgument, "password is required")
-	//}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if err := m.configure(); err != nil {
 		return nil, err
 	}
@@ -104,14 +80,6 @@ func (m *KeyManager) configure() error {
 }
 
 func (m *KeyManager) writeEntries(_ context.Context, entries []*keymanagerbase.KeyEntry) error {
-	//m.mu.Lock()
-	//config := m.config
-	//m.mu.Unlock()
-	//
-	//if config == nil {
-	//	return status.Error(codes.FailedPrecondition, "not configured")
-	//}
-
 	return writeEntries(entries)
 }
 
@@ -120,29 +88,47 @@ type entriesData struct {
 }
 
 func loadEntries() ([]*keymanagerbase.KeyEntry, error) {
-
-	jsonBytes, _ := getAndDecrypt()
-	if jsonBytes == nil {
-		return nil, nil
-	}
-	log.Println("loaded entries from sqlite and decrypted ")
-	data := new(entriesData)
-	if err := json.Unmarshal(jsonBytes, data); err != nil {
-		return nil, status.Errorf(codes.Internal, "unable to decode keys JSON: %v", err)
-	}
-
+	keys := getAndDecrypt()
 	var entries []*keymanagerbase.KeyEntry
-	for id, keyBytes := range data.Keys {
-		key, err := x509.ParsePKCS8PrivateKey(keyBytes)
+	for i, key := range keys {
+		log.Println("\n----\nid: %s \nkeyId: %s \nrandomVal: %s \ntypeVal: %s", key.id, key.keyValue, key.randomValue, key.typeValue)
+
+		log.Println("decrypting random key using tpm")
+		randomDerivedEncryptedKey, _ := hex.DecodeString(keys[i].randomValue)
+		log.Println("decrypt random key from tpm")
+		randDerivedKey := decryptUsingTPM(randomDerivedEncryptedKey)
+		log.Println("decrypted random key from tpm")
+		encString := keys[i].keyValue
+		log.Println("decrypting real data using random key")
+		jsonBytes, err := DecryptData(encString, randDerivedKey)
+		log.Println("decrypted real data")
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "unable to parse key %q: %v", id, err)
+			return nil, err
 		}
-		entry, err := keymanagerbase.MakeKeyEntryFromKey(id, key)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "unable to make entry %q: %v", id, err)
+		log.Println("Decrypted successfully")
+		log.Println(jsonBytes)
+		if jsonBytes == nil {
+			return nil, nil
 		}
-		entries = append(entries, entry)
+		log.Println("loaded entries from sqlite and decrypted ")
+		data := new(entriesData)
+		if err := json.Unmarshal(jsonBytes, data); err != nil {
+			return nil, status.Errorf(codes.Internal, "unable to decode keys JSON: %v", err)
+		}
+
+		for id, keyBytes := range data.Keys {
+			key, err := x509.ParsePKCS8PrivateKey(keyBytes)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "unable to parse key %q: %v", id, err)
+			}
+			entry, err := keymanagerbase.MakeKeyEntryFromKey(id, key)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "unable to make entry %q: %v", id, err)
+			}
+			entries = append(entries, entry)
+		}
 	}
+
 	log.Println("generated certs from the loaded entries")
 	return entries, nil
 }
@@ -174,12 +160,10 @@ func writeEntries(entries []*keymanagerbase.KeyEntry) error {
 	if err != nil {
 		return status.Errorf(codes.Internal, "unable to marshal entries: %v", err)
 	}
+	log.Println(jsonBytes)
 	log.Println("marshalled and indented the required data")
 	encryptAndSave(jsonBytes)
 	log.Println("encrypted and saved successfully")
-	//if err := diskutil.AtomicWritePrivateFile(path, jsonBytes); err != nil {
-	//	return status.Errorf(codes.Internal, "unable to write entries: %v", err)
-	//}
 
 	return nil
 }
@@ -209,7 +193,7 @@ func encryptAndSave(jsonBytes []byte) {
 	log.Println("saved data in sqlite db")
 }
 
-func getAndDecrypt() ([]byte, error) {
+func getAndDecrypt() []signingKeys {
 	db, err := connectToDatabase()
 	defer func(db *sql.DB) {
 		err := db.Close()
@@ -218,40 +202,22 @@ func getAndDecrypt() ([]byte, error) {
 		}
 	}(db)
 	if err != nil {
-		return nil, err
+		return nil
 	}
 	log.Println("getting keys from db")
 	keys := getKeys(db)
-	for _, key := range keys {
-		fmt.Printf("\n----\nid: %s \nkeyId: %s \nrandomVal: %s \ntypeVal: %s", key.id, key.keyValue, key.randomValue, key.typeValue)
-	}
+
 	log.Println("got keys successfully")
 	if len(keys) == 0 {
-		return nil, nil
+		return nil
 	}
-	log.Println("decrypting random key using tpm")
-	randomDerivedEncryptedKey, _ := hex.DecodeString(keys[0].randomValue)
-	log.Println("decrypt random key from tpm")
-	randDerivedKey := decryptUsingTPM(randomDerivedEncryptedKey)
-	log.Println("decrypted random key from tpm")
-	encString := keys[0].keyValue
-	log.Println("decrypting real data using random key")
-	jsonBytes, err := DecryptData(encString, randDerivedKey)
-	log.Println("decrypted real data")
-	if err != nil {
-		return nil, err
-	}
-	fmt.Printf("Decrypted successfully")
-	return jsonBytes, nil
+	return keys
 }
 
 func main() {
 	plugin := newKeyManager(nil)
-	// Serve the plugin. This function call will not return. If there is a
-	// failure to serve, the process will exit with a non-zero exit code.
 	pluginmain.Serve(
 		keymanagerv1.KeyManagerPluginServer(plugin),
-		// TODO: Remove if no configuration is required
-		//configv1.ConfigServiceServer(plugin),
+		configv1.ConfigServiceServer(plugin),
 	)
 }

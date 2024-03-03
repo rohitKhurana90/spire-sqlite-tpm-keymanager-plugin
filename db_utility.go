@@ -40,11 +40,16 @@ func connectToDatabase() (*sql.DB, error) {
 }
 
 func createEmptyFile(filePath string) error {
-	file, err := os.Create(filePath)
-	if err != nil {
-		return err
+	// Check if the file already exists
+	_, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		// File does not exist, create it
+		file, err := os.Create(filePath)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
 	}
-	defer file.Close()
 	return nil
 }
 
